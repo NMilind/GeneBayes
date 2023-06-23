@@ -16,7 +16,7 @@ See the `s_het` directory for details on using GeneBayes to estimate $s_\text{he
   * Installation with GPU support is recommended.
 * Install `ngboost`:
    ```
-   git clone https://github.com/tkzeng/ngboost.git
+   git subtree add --prefix ngboost/ https://github.com/tkzeng/ngboost.git master --squash
    pip install ngboost/
    ```
 * Install `PyTorch`: https://pytorch.org/get-started/locally/
