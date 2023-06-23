@@ -21,40 +21,66 @@ print = partial(print, flush=True)
 
 
 class PriorScore(LogScore):
+
     def score(self, y):
+
         """
         log score, -log P(y), for prior distribution P
         """
+
+        # Parameters of the prior distribution
         params = torch.tensor(self.params_transf, device=device)
         params.requires_grad = True
 
+        # Score calculated for the prior distribution based on the current parameters
+        # Should be the negative log likelihood of the data
         score = 0
+
+        # Gradient of each observation with respect to the parameters of the prior?
+        # Will be used for gradient boosting
         grad = torch.zeros(self.n_params, y.shape[0])
 
+        # Iterate over each observation of s_het?
         for idx in torch.split(torch.randperm(y.shape[0]), split_size_or_sections=1):
+
             boole = Boole()
+            
+            # Domain of integration over Y (s_het)
             domain = torch.tensor([[INTEGRATION_LB, INTEGRATION_UB]], device=device)
+
+            # log_prob is a global that evaluates Pr(pLoF | s_het) * Pr(s_het | X)
             result = boole.integrate(
                 partial(log_prob, Prior.distribution, idx, params, y),
                 dim=1, N=int(N_INTEGRATION_PTS),
                 integration_domain=domain
             )
             assert result > 0
+
+            # Calculate score
             result = -(torch.log(result) + torch.max(y[idx]))
             result.backward()
+
+            # Update score
             score += result.item()
+
+            # Update gradients of the parameters
             grad += params.grad
+
             params.grad = None
 
+        # ???
         grad[Prior.positive, :] *= params[Prior.positive, :]
         self.gradient = grad.T.cpu().detach().numpy()
 
         return score
 
     def d_score(self, data):
+
         """
         derivative of the score
         """
+
+        # Logging whenever the derivative is requested
         for i in range(Prior.n_params):
             p0 = np.min(self.params_transf[i])
             p1 = np.quantile(self.params_transf[i], 0.01)
@@ -63,23 +89,32 @@ class PriorScore(LogScore):
             print(f"param #{i} - min: {p0}, 1st percentile: {p1}, "
                   f"99th percentile: {p99}, max: {p100}")
 
+        # Gradients are calculated with the score
         return self.gradient
 
     def metric(self):
+
+        """
+        Riemann metric of the log score.
+        """
+
         all_grad = []
         for i in range(N_METRIC):
             params = torch.tensor(self.params_transf, device=device)
             params.requires_grad = True
 
+            # Monte Carlo estimation?
             hs = Prior.distribution(params).sample()
             loss = Prior.distribution(params).log_prob(hs)
             loss = -torch.sum(loss)
             loss.backward()
 
+            # ???
             params.grad[Prior.positive, :] *= params[Prior.positive, :]
             all_grad.append(params.grad.T.detach().cpu())
             params.grad = None
 
+        # Gradient is the mean of all the samples from the Monte Carlo simulations
         grad = np.stack(all_grad)
         grad = np.mean(np.einsum("sik,sij->sijk", grad, grad), axis=0)
 
@@ -87,22 +122,39 @@ class PriorScore(LogScore):
 
 
 def log_prob(prior_dist, idx, params, gene_likelihoods, hs):
+
+    """
+    Log probability is the log marginal evidence
+
+    Pr(pLoF | s_het) * Pr(s_het | X)
+
+    Pr(pLoF | s_het) <- likelihood of the model
+    Pr(s_het | X) <- the prior
+    """
+
     hs = torch.squeeze(hs, dim=1)
 
-    # p(hs)
+    # Pr(s_het | X)
+    # What is idx?
     prior_p = torch.exp(
-        prior_dist([p[idx] for p in params]).log_prob(hs))
+        prior_dist([p[idx] for p in params]).log_prob(hs)
+    )
 
-    # p(y|hs)
+    # Pr(pLoF | s_het)
     lh = likelihood(idx, hs, gene_likelihoods)
 
     return prior_p * lh
 
 
 def likelihood(idx, hs, gene_likelihoods):
+
     '''
-    p(y|parameter)
+    The model likelihood.
+    Pr(pLoF | s_het)
     '''
+
+    # Some magic that is specific to Jeff's likelihood model relating pLoFs <-> s_het.
+
     S_GRID = torch.tensor([0.] + np.exp(np.linspace(np.log(1e-8), 0, num=100)).tolist(), device=device)
     likelihoods = gene_likelihoods[idx.expand(hs.shape[0])] - torch.max(gene_likelihoods[idx])
 
@@ -124,54 +176,81 @@ def likelihood(idx, hs, gene_likelihoods):
 
 
 class Prior(RegressionDistn):
+
+    # Number of parameters used to parametrize the prior
     n_params = 2
+
+    # Which parameters are positive
     positive = np.array([False, True])
+
+    # The score to use for comparing two prior distributions
+    # Used to define natural gradient, etc.
     scores = [PriorScore]
 
     def __init__(self, params):
+
         self._params = params
         self.params_transf = np.copy(params)
         self.params_transf[Prior.positive] = np.exp(self.params_transf[Prior.positive])
 
     def distribution(params):
+
         """
         LogitNormal distribution
         https://en.wikipedia.org/wiki/Logit-normal_distribution
         """
+
+        # This is the parametric form of the prior.
+
         return dist.TransformedDistribution(
             dist.Normal(params[0], params[1]),
-            transforms=[dist.SigmoidTransform()])
+            transforms=[dist.SigmoidTransform()]
+        )
 
     def fit(y):
+
         """
         fit initial prior distribution for all genes
         """
+
+        # Initialize params at 0
+        # Initialize params at 1 if strictly positive
         params = []
         for i in range(Prior.n_params):
             if Prior.positive[i]:
                 params.append(torch.tensor(1., requires_grad=True, device=device))
             else:
                 params.append(torch.tensor(0., requires_grad=True, device=device))
+
+        # Optimizer used to perform the initial fit
         optimizer = torch.optim.AdamW(params, lr=LR_INIT)
 
+        # Expand the params to have one for each gene
         for i in range(Prior.n_params):
             params[i] = params[i].expand(y.shape[0])
 
         lr_stage = 0
 
+        # Multiple optimization iterations
         for i in range(MAX_EPOCHS_INIT):
+
             loss = 0
 
+            # Iterate through the genes
             for idx in torch.split(torch.randperm(y.shape[0]), split_size_or_sections=1):
+
                 optimizer.zero_grad()
                 boole = Boole()
                 domain = torch.tensor([[INTEGRATION_LB, INTEGRATION_UB]], device=device)
 
+                # Integrate over log probability with initial parametrization
                 result = boole.integrate(
                     partial(log_prob, Prior.distribution, idx, params, y),
                     dim=1, N=int(N_INTEGRATION_PTS),
                     integration_domain=domain
                 )
+
+                # Calculate score (-log(pLoF | X)) and use it as the loss function for optimization
                 result = -(torch.log(result) + torch.max(y[idx]))
                 result.backward()
                 optimizer.step()
@@ -179,6 +258,7 @@ class Prior(RegressionDistn):
 
             print("loss", loss, "params", [p[0] for p in params], "lr", optimizer.param_groups[0]['lr'])
 
+            # ???
             if i == 0 or loss < min_loss:
                 min_loss = loss
                 min_epoch = i
@@ -186,9 +266,11 @@ class Prior(RegressionDistn):
                 optimizer.param_groups[0]['lr'] = optimizer.param_groups[0]['lr'] / 10
                 lr_stage += 1
 
+            # ???
             if lr_stage > 2:
                 break
 
+        # Return initial parameters
         params = np.array([p[0].item() for p in params])
         params[Prior.positive] = np.log(params[Prior.positive])
 
