@@ -386,13 +386,13 @@ ax.set_ylabel('Predicted Y')
 # Posterior Integral
 #----------------------------------------------------------
 
-def posterior(pr_y, y, m, s_2, u):
+def posterior(pr_y, y, sigma_2, m, s_2, u):
 
     '''
     Returns the posterior Pr(Y, U) / p(Y)
     '''
 
-    pr_y_u = evidence(y, m, s_2, u)
+    pr_y_u = evidence(y, sigma_2, m, s_2, u)
     return torch.exp(torch.log(pr_y_u) - torch.log(pr_y))
 
 # The endpoints (0 and 1) are undefined, so we get arbitrarily close
@@ -408,18 +408,18 @@ eg_pr_y = torch.tensor(1.0)
 
 boole = Boole()
 integrate_posterior = torch.jit.trace(
-    lambda pr_y, y, m, s_2: boole.evaluate_integrand(
-        partial(posterior, pr_y, y, m, s_2),
+    lambda pr_y, y, sigma_2, m, s_2: boole.evaluate_integrand(
+        partial(posterior, pr_y, y, sigma_2, m, s_2),
         grid_points
     ),
-    (eg_pr_y, eg_y, eg_m, eg_s_2)
+    (eg_pr_y, eg_y, eg_sigma_2, eg_m, eg_s_2)
 )
 
 #----------------------------------------------------------
 # Posterior Inference
 #----------------------------------------------------------
 
-def posterior_summary(X, Y, ngb):
+def posterior_summary(X, Y, F, ngb):
 
     '''
     Calculate posterior summaries.
@@ -430,9 +430,11 @@ def posterior_summary(X, Y, ngb):
     '''
 
     Y = torch.tensor(Y)
-    X_dist = ngb.pred_dist(X, max_iter=ngb.best_val_loss_itr)
+    F = torch.tensor(F)
+    X_dist = ngb.pred_dist(X, F, max_iter=ngb.best_val_loss_itr)
     M = torch.tensor(X_dist.params['m'])
     S = torch.tensor(X_dist.params['s'])
+    SIGMA_2 = F[:, 0].clone()
 
     prior_mean = torch.tensor(X_dist.mean()).numpy()
 
@@ -440,15 +442,15 @@ def posterior_summary(X, Y, ngb):
     post_lower = list()
     post_upper = list()
 
-    for y, m, s in zip(Y.split(1), M.split(1), S.split(1)):
+    for y, sigma_2, m, s in zip(Y.split(1), SIGMA_2.split(1), M.split(1), S.split(1)):
 
         s_2 = torch.pow(s, 2)
 
         # Calculate Pr(Y)
-        Pr_Y = integrate_evidence(y, m, s_2)
+        Pr_Y = integrate_evidence(y, sigma_2, m, s_2)
 
         # Calculate Pr(U | Y)
-        post_pdf, _ = integrate_posterior(Pr_Y, y, m, s_2)
+        post_pdf, _ = integrate_posterior(Pr_Y, y, sigma_2, m, s_2)
         post_pdf = post_pdf.squeeze()
 
         # Estimate E(U | Y)
@@ -473,14 +475,14 @@ def posterior_summary(X, Y, ngb):
 # MAP for U
 #----------------------------------------------------------
 
-prior_mean, post_mean, post_lower, post_upper = posterior_summary(X_train, Y_train, ngb)
+prior_mean, post_mean, post_lower, post_upper = posterior_summary(X_train, Y_train, F_train, ngb)
 
 fig, ax = plt.subplots(figsize=(8, 6))
 ax.scatter(U_train, post_mean)
 ax.set_xlabel('Train U')
 ax.set_ylabel('Posterior U MAP')
 
-prior_mean, post_mean, post_lower, post_upper = posterior_summary(X_test, Y_test, ngb)
+prior_mean, post_mean, post_lower, post_upper = posterior_summary(X_test, Y_test, F_test, ngb)
 
 fig, ax = plt.subplots(figsize=(8, 6))
 ax.scatter(U_test, post_mean)
