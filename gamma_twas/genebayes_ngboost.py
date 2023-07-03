@@ -113,9 +113,9 @@ class GeneBayesNGBoost:
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
         self.__dict__ = state_dict
 
-    def fit_init_params_to_marginal(self, Y, sample_weight=None, iters=1000):
+    def fit_init_params_to_marginal(self, Y, F, sample_weight=None, iters=1000):
         self.init_params = self.Manifold.fit(
-            Y
+            Y, F.T
         )  # would be best to put sample weights here too
 
     def pred_param(self, X, max_iter=None):
@@ -353,7 +353,7 @@ class GeneBayesNGBoost:
         self.n_features = X.shape[1]
 
         loss_list = []
-        self.fit_init_params_to_marginal(Y)
+        self.fit_init_params_to_marginal(Y, F)
 
         params = self.pred_param(X)
 

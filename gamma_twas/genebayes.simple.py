@@ -12,7 +12,7 @@ from torchquad import Boole
 from sklearn.datasets import load_diabetes
 from sklearn.model_selection import train_test_split
 
-from ngboost import NGBRegressor
+from genebayes_ngboost import GeneBayesNGBRegressor
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
 
@@ -43,15 +43,14 @@ X = np.random.randn(OBSERVATIONS, PARAMETERS)
 # The mean and variance of U are a function of X
 U = (np.random.randn(OBSERVATIONS) + X @ np.random.randn(PARAMETERS)) * np.exp((X @ np.random.randn(PARAMETERS)) / PARAMETERS)
 
-# Create the observed variances Y_s
-# For now, assume Y_s = 1 for all observations
-Y_s = np.repeat(1.0, OBSERVATIONS)
+# Create the observed variances F
+F = np.exp(np.random.randn(OBSERVATIONS)).reshape(-1, 1)
 
 # Create the observed variable Y
-Y = (np.random.randn(OBSERVATIONS) + U) * np.sqrt(Y_s)
+Y = (np.random.randn(OBSERVATIONS) + U) * np.sqrt(F.flatten())
 
 # Split into training and testing
-X_train, X_test, Y_train, Y_test, U_train, U_test = train_test_split(X, Y, U, test_size=0.1)
+X_train, X_test, Y_train, Y_test, F_train, F_test, U_train, U_test = train_test_split(X, Y, F, U, test_size=0.1)
 
 # Plot Y against U
 fig, ax = plt.subplots(figsize=(8, 6))
@@ -72,13 +71,13 @@ ax.legend()
 # Likelihood
 #----------------------------------------------------------
 
-def log_likelihood(y, u):
+def log_likelihood(y, sigma_2, u):
     
     '''
     The log likelihood of the data, which is Pr(Y | U).
     '''
 
-    log_lik = dists.Normal(loc=u, scale=torch.tensor(1.0)).log_prob(y)
+    log_lik = dists.Normal(loc=u, scale=torch.sqrt(sigma_2)).log_prob(y)
 
     return log_lik
 
@@ -100,14 +99,14 @@ def log_prior(u, m, s_2):
 # Evidence
 #----------------------------------------------------------
 
-def evidence(y, m, s_2, u):
+def evidence(y, sigma_2, m, s_2, u):
 
     '''
     The evidence, which is Pr(Y | X) = Pr(Y | U) * Pr(U | X).
     '''
 
     log_pr = log_prior(u, m, s_2)
-    log_lik = log_likelihood(y, u)
+    log_lik = log_likelihood(y, sigma_2, u)
 
     return torch.exp(log_pr + log_lik)
 
@@ -117,14 +116,15 @@ def evidence(y, m, s_2, u):
 
 # Example input tensors for JIT trace
 eg_y = torch.tensor(0.0)
+eg_sigma_2 = torch.tensor(1.0)
 eg_m = torch.tensor(0.0)
 eg_s_2 = torch.tensor(1.0)
 
 # Transform so that U is in [0, 1] rather than [-infinity, infinity]
-def evidence_transformed(y, m, s_2, u):
+def evidence_transformed(y, sigma_2, m, s_2, u):
 
-    eval_1 = evidence(y, m, s_2, (1 / u) - 1)
-    eval_2 = evidence(y, m, s_2, (-1 / u) + 1)
+    eval_1 = evidence(y, sigma_2, m, s_2, (1 / u) - 1)
+    eval_2 = evidence(y, sigma_2, m, s_2, (-1 / u) + 1)
     
     return (eval_1 + eval_2) / torch.pow(u, 2)
 
@@ -139,17 +139,17 @@ N_INTEGRATION_PTS = 1001
 grid_points, hs, n_per_dim = boole.calculate_grid(N_INTEGRATION_PTS, domain)
 grid_size = (INT_LB - INT_UB) / N_INTEGRATION_PTS
 
-def jit_integrate_evidence(y, m, s_2):
+def jit_integrate_evidence(y, sigma_2, m, s_2):
 
     evals, _ = boole.evaluate_integrand(
-        partial(evidence_transformed, y, m, s_2),
+        partial(evidence_transformed, y, sigma_2, m, s_2),
         grid_points
     )
     return boole.calculate_result(evals, 1, n_per_dim, hs)
 
 integrate_evidence = torch.jit.trace(
     jit_integrate_evidence,
-    (eg_y, eg_m, eg_s_2)
+    (eg_y, eg_sigma_2, eg_m, eg_s_2)
 )
 
 #----------------------------------------------------------
@@ -176,6 +176,7 @@ class PriorLogScore(LogScore):
         Y = torch.tensor(D)
         M = torch.tensor(self.m, requires_grad=True)
         S_2 = torch.tensor(self.s_2, requires_grad=True)
+        SIGMA_2 = torch.tensor(self.sigma_2)
 
         # Aggregate the score for all data into one value
         score = torch.tensor(0.0)
@@ -185,11 +186,11 @@ class PriorLogScore(LogScore):
 
         # Iterate over each data point and calculate score
         # TODO: Randomize this?
-        for y, m, s_2 in zip(Y.split(1), M.split(1), S_2.split(1)):
+        for y, sigma_2, m, s_2 in zip(Y.split(1), SIGMA_2.split(1), M.split(1), S_2.split(1)):
 
             # Calculate the evidence
-            Pr_Y = integrate_evidence(y, m, s_2)
-            assert Pr_Y.item() >= 0
+            Pr_Y = integrate_evidence(y, sigma_2, m, s_2)
+            assert Pr_Y.item() >= 0, f'Invalid likelihood: {Pr_Y.item()} with parameters {y.item()}, {sigma_2.item()}, {m.item()}, {s_2.item()}'
 
             # Add the negative log evidence (score)
             score += -torch.log(Pr_Y)
@@ -237,11 +238,12 @@ class PriorLogScore(LogScore):
             # Create tensors from parameters
             M = torch.tensor(self.m)
             S = torch.tensor(self.s)
+            SIGMA = torch.tensor(self.sigma)
             
             # Sample Y | X by sampling U | X and then Y | U
             prior = dists.Normal(M, S)
             u = prior.sample()
-            likelihood = dists.Normal(u, torch.tensor(1.0))
+            likelihood = dists.Normal(u, SIGMA)
             y = likelihood.sample().numpy()
 
             # Calculate gradients and add
@@ -266,20 +268,25 @@ class Prior(RegressionDistn):
     scores = [PriorLogScore]
     multi_output = False
 
-    def __init__(self, params):
+    def __init__(self, params, fixed):
 
         # Internal reference required for NGBoost
         self._params = params
+        self._fixed = fixed
 
         # Extract parameters
         self.m = params[0]
         self.log_s_2 = params[1]
 
+        # Extract fixed parameters
+        self.sigma_2 = fixed[0]
+
         # Convert to useful forms
         self.s_2 = np.exp(self.log_s_2)
         self.s = np.sqrt(self.s_2)
+        self.sigma = np.sqrt(self.sigma_2)
 
-    def fit(D):
+    def fit(D, F):
 
         '''
         Fit the observations to the marginal distribution. In NGBoost, this is used to
@@ -290,6 +297,7 @@ class Prior(RegressionDistn):
         '''
 
         Y = torch.tensor(D)
+        log_sigma_2 = torch.tensor(F[0])
 
         # Initialize parameters
         m_y = torch.tensor(0.0, requires_grad=True)
@@ -320,11 +328,12 @@ class Prior(RegressionDistn):
                 # Extract the parameter values for this data point
                 # NOTE: The parameter value is shared across all data points
                 y = Y[idx]
+                sigma_2 = torch.exp(log_sigma_2[idx])
                 m = m_y[idx]
                 s_2 = torch.exp(log_s_2_y[idx])
 
                 # Calculate negative log evidence as the loss
-                result = -torch.log(integrate_evidence(y, m, s_2))
+                result = -torch.log(integrate_evidence(y, sigma_2, m, s_2))
         
                 # Calculate gradients based on loss
                 result.backward()
@@ -356,13 +365,13 @@ class Prior(RegressionDistn):
 # Training
 #----------------------------------------------------------
 
-ngb = NGBRegressor(
+ngb = GeneBayesNGBRegressor(
     Dist=Prior,
     learning_rate=0.001, early_stopping_rounds=10,
     n_estimators=100
-).fit(X_train, Y_train)
-Y_preds = ngb.predict(X_test)
-Y_dists = ngb.pred_dist(X_test)
+).fit(X_train, Y_train, F_train)
+Y_preds = ngb.predict(X_test, F_test)
+Y_dists = ngb.pred_dist(X_test, F_test)
 
 #----------------------------------------------------------
 # Test Set Performance for Predicting Y
