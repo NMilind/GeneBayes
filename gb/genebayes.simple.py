@@ -12,7 +12,7 @@ from torchquad import Boole
 from sklearn.datasets import load_diabetes
 from sklearn.model_selection import train_test_split
 
-from genebayes_ngboost import GeneBayesNGBRegressor
+from gbngboost import GeneBayesNGBRegressor
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
 
@@ -173,16 +173,16 @@ class PriorLogScore(LogScore):
         '''
 
         # Convert to Torch tensors for gradient calculation
-        Y = torch.tensor(D)
-        M = torch.tensor(self.m, requires_grad=True)
-        S_2 = torch.tensor(self.s_2, requires_grad=True)
-        SIGMA_2 = torch.tensor(self.sigma_2)
+        Y = torch.tensor(D, device=device)
+        M = torch.tensor(self.m, requires_grad=True, device=device)
+        S_2 = torch.tensor(self.s_2, requires_grad=True, device=device)
+        SIGMA_2 = torch.tensor(self.sigma_2, device=device)
 
         # Aggregate the score for all data into one value
-        score = torch.tensor(0.0)
+        score = torch.tensor(0.0, device=device)
 
         # Create a matrix to store the gradient w.r.t. each parameter
-        self.gradient = torch.zeros(Y.shape[0], self.n_params)
+        self.gradient = torch.zeros(Y.shape[0], self.n_params, device=device)
 
         # Iterate over each data point and calculate score
         # TODO: Randomize this?
@@ -202,7 +202,7 @@ class PriorLogScore(LogScore):
         # Note: For S_2, multiply by (dlog(s_2) / ds_2)^(-1)
         self.gradient[:, 0] = M.grad
         self.gradient[:, 1] = S_2.grad * S_2
-        self.gradient = self.gradient.detach().numpy()
+        self.gradient = self.gradient.detach().cpu().numpy()
 
         # Set gradients to zero (clear buffers)
         M.grad = None
@@ -296,12 +296,12 @@ class Prior(RegressionDistn):
         :param D: All the observed data.
         '''
 
-        Y = torch.tensor(D)
-        log_sigma_2 = torch.tensor(F[0])
+        Y = torch.tensor(D, device=device)
+        log_sigma_2 = torch.tensor(F[0], device=device)
 
         # Initialize parameters
-        m_y = torch.tensor(0.0, requires_grad=True)
-        log_s_2_y = torch.tensor(1.0, requires_grad=True)
+        m_y = torch.tensor(0.0, requires_grad=True, device=device)
+        log_s_2_y = torch.tensor(1.0, requires_grad=True, device=device)
 
         # Initialize optimizer
         LR_INIT = 0.001
@@ -312,7 +312,7 @@ class Prior(RegressionDistn):
         log_s_2_y = log_s_2_y.expand(Y.shape[0])
 
         # Iterate over a set number of epochs
-        MAX_EPOCHS_INIT = 50
+        MAX_EPOCHS_INIT = 150
 
         for i in range(MAX_EPOCHS_INIT):
             
@@ -429,14 +429,14 @@ def posterior_summary(X, Y, F, ngb):
     :param ngb: The trained model.
     '''
 
-    Y = torch.tensor(Y)
-    F = torch.tensor(F)
+    Y = torch.tensor(Y, device=device)
+    F = torch.tensor(F, device=device)
     X_dist = ngb.pred_dist(X, F, max_iter=ngb.best_val_loss_itr)
-    M = torch.tensor(X_dist.params['m'])
-    S = torch.tensor(X_dist.params['s'])
+    M = torch.tensor(X_dist.params['m'], device=device)
+    S = torch.tensor(X_dist.params['s'], device=device)
     SIGMA_2 = F[:, 0].clone()
 
-    prior_mean = torch.tensor(X_dist.mean()).numpy()
+    prior_mean = X_dist.mean()
 
     post_mean = list()
     post_lower = list()
