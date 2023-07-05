@@ -41,6 +41,7 @@ class PriorScore(LogScore):
         grad = torch.zeros(self.n_params, y.shape[0])
 
         # Iterate over each observation of s_het?
+        # QUESTION: Why random permutation?
         for idx in torch.split(torch.randperm(y.shape[0]), split_size_or_sections=1):
 
             boole = Boole()
@@ -57,6 +58,7 @@ class PriorScore(LogScore):
             assert result > 0
 
             # Calculate score
+            # QUESTION: Why add the max value of Y here?
             result = -(torch.log(result) + torch.max(y[idx]))
             result.backward()
 
@@ -68,7 +70,6 @@ class PriorScore(LogScore):
 
             params.grad = None
 
-        # ???
         grad[Prior.positive, :] *= params[Prior.positive, :]
         self.gradient = grad.T.cpu().detach().numpy()
 
@@ -104,12 +105,12 @@ class PriorScore(LogScore):
             params.requires_grad = True
 
             # Monte Carlo estimation?
+            # QUESTION: Why the prior and not the evidence?
             hs = Prior.distribution(params).sample()
             loss = Prior.distribution(params).log_prob(hs)
             loss = -torch.sum(loss)
             loss.backward()
 
-            # ???
             params.grad[Prior.positive, :] *= params[Prior.positive, :]
             all_grad.append(params.grad.T.detach().cpu())
             params.grad = None
@@ -237,6 +238,7 @@ class Prior(RegressionDistn):
             loss = 0
 
             # Iterate through the genes
+            # QUESTION: Random here because it is SGD?
             for idx in torch.split(torch.randperm(y.shape[0]), split_size_or_sections=1):
 
                 optimizer.zero_grad()
@@ -258,7 +260,7 @@ class Prior(RegressionDistn):
 
             print("loss", loss, "params", [p[0] for p in params], "lr", optimizer.param_groups[0]['lr'])
 
-            # ???
+            # QUESTION: What is this?
             if i == 0 or loss < min_loss:
                 min_loss = loss
                 min_epoch = i
@@ -266,7 +268,6 @@ class Prior(RegressionDistn):
                 optimizer.param_groups[0]['lr'] = optimizer.param_groups[0]['lr'] / 10
                 lr_stage += 1
 
-            # ???
             if lr_stage > 2:
                 break
 

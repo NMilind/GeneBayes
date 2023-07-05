@@ -321,8 +321,8 @@ if __name__ == "__main__":
     y = y.loc[feature_table.index].reset_index(drop=True)
 
     ### train ###
-    train_idx = ~feature_table["chrom"].isin(["chr2", "chr4", "chr6"])
-    val_idx = feature_table["chrom"].isin(["chr2", "chr4", "chr6"])
+    train_idx = feature_table["chrom"].isin(["chr22"])
+    val_idx = feature_table["chrom"].isin(["chr21"])
 
     X = feature_table.drop([col for col in [GENE_COLUMN, "ensg", "hgnc", "chrom"] if col in feature_table.columns], axis=1)
     y = y.drop([col for col in [GENE_COLUMN, "ensg", "hgnc", "chrom"] if col in y.columns], axis=1)
